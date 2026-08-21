@@ -43,6 +43,14 @@ type Options struct {
 	Matchers []Matcher
 	Excludes []Matcher
 	Logger   *slog.Logger // Optional; defaults to slog.Default().
+
+	// OnEvent, if non-nil, is invoked for every input event read
+	// from a grabbed device, in the order it is read. It runs on the
+	// drain goroutine, so a slow handler will delay event
+	// consumption (and may keep the kernel event queue from being
+	// drained in real time). The capture package still processes the
+	// break-out combo internally before invoking OnEvent.
+	OnEvent func(*evdev.InputEvent)
 }
 
 // NewSession lists /dev/input/event* devices, applies matchers and
@@ -60,7 +68,11 @@ func NewSession(ctx context.Context, opts Options) (Session, error) {
 		return nil, fmt.Errorf("list devices: %w", err)
 	}
 
-	s := &session{logger: logger, grabs: make(map[string]*evdev.InputDevice)}
+	s := &session{
+		logger:  logger,
+		grabs:   make(map[string]*evdev.InputDevice),
+		onEvent: opts.OnEvent,
+	}
 	for _, dev := range devs {
 		if !matchAll(dev, opts.Matchers) {
 			continue
@@ -96,6 +108,12 @@ type session struct {
 	// before any drain goroutine is started, so no synchronization
 	// is required for the read in drainLoop.
 	cancel context.CancelFunc
+
+	// onEvent is the per-event callback passed via Options. It is
+	// read-only after NewSession — multiple drain goroutines may
+	// invoke it concurrently, so the callback itself must be
+	// goroutine-safe.
+	onEvent func(*evdev.InputEvent)
 }
 
 // Devices returns the paths of every device currently held. The order
@@ -161,6 +179,12 @@ func (s *session) drainLoop(ctx context.Context, dev *evdev.InputDevice) {
 					"path", dev.Path(), "err", err)
 			}
 			return
+		}
+		// Hand the raw event off first so any consumer that wants to
+		// observe every event (e.g. an --echo printer) sees the same
+		// stream that the break-out detector sees.
+		if s.onEvent != nil {
+			s.onEvent(ev)
 		}
 		if ev.Type != evdev.EV_KEY {
 			continue
