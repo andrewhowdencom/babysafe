@@ -30,7 +30,11 @@ type echoDecoder struct {
 
 // feed advances the decoder's state and returns the string to print
 // for this event, or "" if the event produces no output (release
-// events, modifier presses, non-key events, etc.).
+// events and modifier presses).
+//
+// As with modifierState.update, autorepeat (ev.Value == 2) is
+// treated as "still held" so holding Shift + A prints 'A', not 'a'.
+// Releases (ev.Value == 0) are treated as "up".
 func (d *echoDecoder) feed(ev *evdev.InputEvent) string {
 	if ev.Type != evdev.EV_KEY {
 		return ""
@@ -39,25 +43,26 @@ func (d *echoDecoder) feed(ev *evdev.InputEvent) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	isDown := ev.Value != 0
 	switch ev.Code {
 	case evdev.KEY_LEFTSHIFT, evdev.KEY_RIGHTSHIFT:
-		d.shift = ev.Value == 1
+		d.shift = isDown
 		return ""
 	case evdev.KEY_LEFTCTRL, evdev.KEY_RIGHTCTRL:
-		d.ctrl = ev.Value == 1
+		d.ctrl = isDown
 		return ""
 	case evdev.KEY_LEFTALT, evdev.KEY_RIGHTALT:
-		d.alt = ev.Value == 1
+		d.alt = isDown
 		return ""
 	case evdev.KEY_LEFTMETA, evdev.KEY_RIGHTMETA:
-		d.meta = ev.Value == 1
+		d.meta = isDown
 		return ""
 	}
 
-	// Only print on key-down. Releases and repeats still pass through
-	// here so the modifier bookkeeping above runs, but produce no
-	// output of their own.
-	if ev.Value != 1 {
+	// Releases produce nothing. Presses (1) and autorepeats (2)
+	// both produce output — holding K prints "KKKK...", which is
+	// what the user would actually see at the keyboard.
+	if ev.Value == 0 {
 		return ""
 	}
 
