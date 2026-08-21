@@ -17,36 +17,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	evdev "github.com/holoplot/go-evdev"
 )
 
-// DefaultDeviceGlob is the path glob used when none is configured.
-const DefaultDeviceGlob = "/dev/input/event*"
-
-// Options configures a capture Session.
-type Options struct {
-	// DeviceGlobs are shell-style globs resolved against the filesystem.
-	DeviceGlobs []string
-
-	// Excludes is a list of substrings. Any device path containing one
-	// of these substrings is skipped. Useful for ignoring a touchscreen
-	// or a particular keyboard.
-	Excludes []string
-
-	// ReleaseOnExit controls whether grabbed devices are released when
-	// the session is closed.
-	ReleaseOnExit bool
-}
-
 // Session represents an active grab over one or more input devices.
 type Session interface {
-	// DeviceCount returns the number of devices currently held.
-	DeviceCount() int
+	// Devices returns the paths of every device currently held.
+	Devices() []string
 
 	// Run blocks until ctx is cancelled or a fatal error occurs.
 	Run(ctx context.Context) error
@@ -55,36 +35,50 @@ type Session interface {
 	Close(ctx context.Context) error
 }
 
-// NewSession validates options, enumerates matching devices, and
-// returns a Session ready to be Run. If grabbing any device fails the
-// session is closed before the error is returned so the caller isn't
-// left holding a partial grab.
+// Options configures a capture Session. Matchers are AND-ed: a device
+// must satisfy every Matcher to be grabbed. Excludes are OR-ed: a
+// device that matches any Exclude is skipped.
+type Options struct {
+	Matchers []Matcher
+	Excludes []Matcher
+	Logger   *slog.Logger // Optional; defaults to slog.Default().
+}
+
+// NewSession lists /dev/input/event* devices, applies matchers and
+// excludes, and grabs every surviving device. If any grab fails, all
+// previously-opened grabs are released before the error is returned.
 func NewSession(ctx context.Context, opts Options) (Session, error) {
-	if len(opts.DeviceGlobs) == 0 {
-		opts.DeviceGlobs = []string{DefaultDeviceGlob}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
+	logger = logger.With("component", "capture")
 
-	paths, err := resolveDevices(opts.DeviceGlobs, opts.Excludes)
+	devs, err := ListDevices(ctx, logger)
 	if err != nil {
-		return nil, fmt.Errorf("resolve devices: %w", err)
+		return nil, fmt.Errorf("list devices: %w", err)
 	}
 
-	logger := slog.Default().With("component", "capture")
-	s := &session{
-		opts:   opts,
-		paths:  paths,
-		grabs:  make(map[string]*evdev.InputDevice),
-		logger: logger,
+	s := &session{logger: logger, grabs: make(map[string]*evdev.InputDevice)}
+	for _, dev := range devs {
+		if !matchAll(dev, opts.Matchers) {
+			continue
+		}
+		if matchAny(dev, opts.Excludes) {
+			continue
+		}
+
+		if err := s.openAndGrab(dev.Path); err != nil {
+			// Best-effort release so we never leave a partial grab.
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_ = s.Close(releaseCtx)
+			cancel()
+			return nil, err
+		}
 	}
 
-	if err := s.grabAll(ctx); err != nil {
-		// Best-effort release so the caller isn't left holding devices.
-		// Strip cancellation from the parent so a cancelled ctx can't
-		// prevent us from releasing the grabs we already made.
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		_ = s.Close(releaseCtx)
-		return nil, err
+	if len(s.grabs) == 0 {
+		return nil, errors.New("no devices matched the requested filters")
 	}
 
 	return s, nil
@@ -92,18 +86,21 @@ func NewSession(ctx context.Context, opts Options) (Session, error) {
 
 // session is the concrete Session implementation.
 type session struct {
-	opts   Options
-	paths  []string
 	mu     sync.Mutex
 	grabs  map[string]*evdev.InputDevice
 	logger *slog.Logger
 }
 
-// DeviceCount returns the number of devices currently held.
-func (s *session) DeviceCount() int {
+// Devices returns the paths of every device currently held. The order
+// is not stable; callers that care should sort the result.
+func (s *session) Devices() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.grabs)
+	out := make([]string, 0, len(s.grabs))
+	for p := range s.grabs {
+		out = append(out, p)
+	}
+	return out
 }
 
 // Run parks the goroutine until ctx is done. There is no event
@@ -129,7 +126,6 @@ func (s *session) Close(_ context.Context) error {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("ungrab %s: %w", path, err)
 			}
-			// Still try to close the underlying fd.
 		}
 		if err := dev.Close(); err != nil {
 			s.logger.Warn("close device failed", "path", path, "err", err)
@@ -142,59 +138,47 @@ func (s *session) Close(_ context.Context) error {
 	return firstErr
 }
 
-// grabAll opens every matched device and issues an EVIOCGRAB.
-func (s *session) grabAll(_ context.Context) error {
-	for _, path := range s.paths {
-		dev, err := evdev.Open(path)
-		if err != nil {
-			return fmt.Errorf("open %s: %w (root required)", path, err)
-		}
-
-		if err := dev.Grab(); err != nil {
-			_ = dev.Close()
-			return fmt.Errorf("grab %s: %w", path, err)
-		}
-
-		s.mu.Lock()
-		s.grabs[path] = dev
-		s.mu.Unlock()
-
-		s.logger.Info("grabbed input device", "path", path)
+// openAndGrab opens the file at path (which may be a /dev/input/by-id
+// symlink) and issues EVIOCGRAB on the resulting file descriptor. The
+// kernel resolves the symlink; the fd is bound to the underlying
+// /dev/input/eventN, so Ungrab/Close always operate on the right
+// device even if the symlink disappears mid-grab.
+func (s *session) openAndGrab(path string) error {
+	dev, err := evdev.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w (root required)", path, err)
 	}
+
+	if err := dev.Grab(); err != nil {
+		_ = dev.Close()
+		return fmt.Errorf("grab %s: %w", path, err)
+	}
+
+	s.mu.Lock()
+	s.grabs[path] = dev
+	s.mu.Unlock()
+
+	s.logger.Info("grabbed input device", "path", path)
 	return nil
 }
 
-// resolveDevices expands every glob, then filters out paths that
-// contain any of the exclude substrings.
-func resolveDevices(globs, excludes []string) ([]string, error) {
-	var matches []string
-
-	for _, g := range globs {
-		expanded, err := filepath.Glob(g)
-		if err != nil {
-			return nil, fmt.Errorf("invalid glob %q: %w", g, err)
+// matchAll returns true iff every matcher returns true (or there are
+// no matchers).
+func matchAll(d *Device, ms []Matcher) bool {
+	for _, m := range ms {
+		if !m(d) {
+			return false
 		}
-		matches = append(matches, expanded...)
 	}
+	return true
+}
 
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("no input devices matched globs %v", globs)
-	}
-
-	filtered := matches[:0]
-nextMatch:
-	for _, m := range matches {
-		for _, e := range excludes {
-			if strings.Contains(m, e) {
-				continue nextMatch
-			}
+// matchAny returns true iff any matcher returns true.
+func matchAny(d *Device, ms []Matcher) bool {
+	for _, m := range ms {
+		if m(d) {
+			return true
 		}
-		filtered = append(filtered, m)
 	}
-
-	if len(filtered) == 0 {
-		return nil, fmt.Errorf("every device was excluded by %v", excludes)
-	}
-
-	return filtered, nil
+	return false
 }

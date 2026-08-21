@@ -2,61 +2,77 @@
 
 > A tool that captures inputs entirely (Linux Only), so that babies can play without inadvertently breaking stuff.
 
-`babysafe` grabs every available Linux input device (`/dev/input/event*`) so
-that a small human can sit at the keyboard without accidentally triggering
-actions on the host. Devices are released automatically on `SIGINT` /
-`SIGTERM`, or held if `--release-on-exit=false` is set.
+`babysafe` grabs Linux input devices on demand so that a small human can sit
+at the keyboard without accidentally triggering actions on the host. Devices
+are released automatically on `SIGINT` / `SIGTERM`.
 
-## Status
-
-Skeleton. The CLI, configuration plumbing, and the input-grab primitives
-are in place. End-to-end grab behaviour will be exercised as soon as the
-project is run on a Linux host with access to `/dev/input/event*`.
+There is no configuration file. Everything is expressed on the command line.
 
 ## Quick start
 
 ```bash
-# Build and run.
-task build:linux
-sudo ./bin/babysafe run
+# What input devices does the kernel see, and what are they called?
+sudo babysafe list
 
-# With a config file.
-sudo ./bin/babysafe --config ./babysafe.yaml run
+# Just grab every keyboard.
+sudo babysafe grab --match type=keyboard
 
-# Different log verbosity.
-./bin/babysafe --log-level debug run
+# Grab a specific keyboard by friendly name.
+sudo babysafe grab --match name=Logitech
+
+# Grab by device path (glob works against by-id and by-path symlinks).
+sudo babysafe grab --match path=/dev/input/by-id/usb-Logitech_*-event-kbd
+
+# Combine rules. A device must satisfy every --match and no --exclude.
+sudo babysafe grab \
+  --match type=keyboard \
+  --exclude path=/dev/input/event0
 ```
 
-## Configuration
+To stop a session, press `Ctrl-C` (SIGINT) or send `SIGTERM`. Every grabbed
+device is released before the process exits.
 
-The default configuration is in `internal/config/config.go`. Any of these
-keys can be overridden:
+## Commands
 
-| Key                          | Type      | Default              | Description                                       |
-| ---------------------------- | --------- | -------------------- | ------------------------------------------------- |
-| `log.level`                  | string    | `info`               | `debug`, `info`, `warn`, `error`.                 |
-| `capture.device-globs`       | []string  | `["/dev/input/event*"]` | Globs expanded against the filesystem.         |
-| `capture.excludes`           | []string  | `[]`                 | Substrings: any path matching is skipped.         |
-| `capture.release-on-exit`    | bool      | `true`               | Release devices when the process exits.           |
+| Command   | Description                                       |
+| --------- | ------------------------------------------------- |
+| `list`    | List input devices and their detected types.      |
+| `grab`    | Grab devices matching the supplied filters.       |
+| `version` | Print the babysafe version and exit.              |
 
-Settings can be supplied in three ways (highest priority last):
+`grab` accepts repeatable `--match` and `--exclude` flags of the form
+`key=value`. Supported keys are:
 
-1. Built-in defaults.
-2. A YAML file at `--config <path>` (or `./babysafe.yaml` by default).
-3. Environment variables prefixed with `BABYSAFE_`, e.g. `BABYSAFE_LOG_LEVEL=debug`.
+| Key    | Example value                                       | Meaning                                          |
+| ------ | --------------------------------------------------- | ------------------------------------------------ |
+| `path` | `/dev/input/by-id/usb-Logitech_*-event-kbd`         | Glob against the device path (symlinks resolved).|
+| `name` | `Logitech G512`                                     | Case-insensitive substring of `EVIOCGNAME`.      |
+| `type` | `keyboard` \| `mouse` \| `touchpad` \| `gamepad` \| `other` | Match a category inferred from capabilities. |
+
+`babysafe` itself accepts `--log-level debug|info|warn|error`.
+
+## Why Linux only?
+
+`pkg/capture` issues `EVIOCGRAB`, a Linux-specific ioctl that asks the
+kernel to route every event from a given device to this process
+exclusively. There is no portable equivalent.
 
 ## Project layout
 
 ```
 cmd/babysafe/main.go      Entry point. Minimal.
-internal/cli/             Cobra command tree.
-internal/config/          Typed configuration + viper hydration.
-internal/app/             Application logic; the seam between CLI and capture.
+internal/cli/             Cobra command tree (root, list, grab, version).
 internal/version/         Build-time version stamp.
 pkg/capture/              Linux input-grab primitives (importable as a Go library).
+  capture.go              Session lifecycle, match-and-grab loop.
+  match.go                path / name / type Matchers.
+  list.go                 ListDevices + DeviceType detection.
 Taskfile.yml              Task runner — `task validate` runs the whole suite.
 .golangci.yaml            golangci-lint configuration.
 ```
+
+`pkg/capture` lives under `pkg/` (not `internal/`) on purpose: any Go program
+can import it to grab input devices without pulling in the babysafe CLI.
 
 ## Development
 
@@ -70,13 +86,6 @@ task build:linux # Same, but force GOOS=linux.
 task run         # `go run ./cmd/babysafe` (honours `CLI_ARGS`).
 task clean       # Remove build artifacts.
 ```
-
-## Why Linux only?
-
-`pkg/capture` issues `EVIOCGRAB`, a Linux-specific ioctl that asks the
-kernel to route every event from a given device to this process
-exclusively. There is no portable equivalent — the package documents
-this loudly and refuses to attempt cross-platform compilation in CI.
 
 ## License
 
