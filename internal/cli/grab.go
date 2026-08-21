@@ -43,12 +43,13 @@ the form key=value:
 A device is grabbed when every --match succeeds and no --exclude
 succeeds. With no filters, every readable input device is grabbed.
 
-With --echo, the keys the grab catches are decoded and printed to
+By default, the keys the grab catches are decoded and printed to
 stdout as they would appear at the keyboard — useful for seeing
 what a child is typing without releasing the grab. Special keys
 (Enter, Tab, arrow keys, F-keys, …) are shown as bracketed names
 like [ENTER]. The decoder assumes a US keyboard layout; non-US
-layouts will mis-decode. Press Ctrl+Alt+Esc to release the session.`,
+layouts will mis-decode. Pass --echo=false to suppress this output.
+Press Ctrl+Alt+Esc to release the session.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -109,8 +110,8 @@ layouts will mis-decode. Press Ctrl+Alt+Esc to release the session.`,
 		"Match expression (key=value, repeatable). Keys: path, name, type.")
 	cmd.Flags().StringSliceVar(&excludeExprs, "exclude", nil,
 		"Exclude expression (key=value, repeatable). Same syntax as --match.")
-	cmd.Flags().BoolVar(&echo, "echo", false,
-		"Print each key event to stdout as the user would type it.")
+	cmd.Flags().BoolVar(&echo, "echo", true,
+		"Print each key event to stdout as the user would type it. Default true; pass --echo=false to disable.")
 
 	return cmd
 }
