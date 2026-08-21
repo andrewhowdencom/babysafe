@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -103,15 +104,44 @@ func (s *session) Devices() []string {
 	return out
 }
 
-// Run parks the goroutine until ctx is done. There is no event
-// processing in the skeleton — once devices are grabbed, they're
-// swallowed by the kernel until release.
+// Run parks the goroutine until ctx is done. While parked, it actively
+// drains events from each grabbed device so the kernel-side event
+// queue does not grow unbounded, and so the firmware of certain
+// keyboards (e.g., Logitech G512) does not see an unresponsive host —
+// which would otherwise get the firmware's autorepeat state stuck and
+// cause release events to be lost. Events are read and discarded;
+// there is no event processing in the skeleton.
 func (s *session) Run(ctx context.Context) error {
+	s.mu.Lock()
+	for _, dev := range s.grabs {
+		s.startDrain(dev)
+	}
+	s.mu.Unlock()
+
 	<-ctx.Done()
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("session context: %w", err)
 	}
 	return nil
+}
+
+// startDrain launches a goroutine that reads events from dev and
+// discards them. The goroutine exits when ReadOne returns an error —
+// typically because the device was closed by Close(). Any other error
+// is logged at debug level so it can be diagnosed without making the
+// happy path noisy.
+func (s *session) startDrain(dev *evdev.InputDevice) {
+	go func() {
+		for {
+			if _, err := dev.ReadOne(); err != nil {
+				if !errors.Is(err, os.ErrClosed) {
+					s.logger.Debug("event drain ended unexpectedly",
+						"path", dev.Path(), "err", err)
+				}
+				return
+			}
+		}
+	}()
 }
 
 // Close releases every grabbed device. Safe to call repeatedly.
