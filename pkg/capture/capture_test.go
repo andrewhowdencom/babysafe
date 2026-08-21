@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	evdev "github.com/holoplot/go-evdev"
 )
 
 // TestListDevicesWithFixtures creates a synthetic /dev/input layout
@@ -169,5 +171,95 @@ func TestPublicTypesStable(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DeviceType string values changed: got %v, want %v", got, want)
+	}
+}
+
+// TestModifierState exercises the modifier-tracking logic that the
+// drain loop uses to detect the Ctrl+Alt+Esc break-out combo. The
+// table cases cover the matching combo, both half-combos, the bare
+// trigger key, the right-hand variants, and the release path.
+func TestModifierState(t *testing.T) {
+	tests := []struct {
+		name      string
+		events    []*evdev.InputEvent
+		wantBreak bool
+	}{
+		{
+			name: "ctrl+alt+esc triggers",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: true,
+		},
+		{
+			name: "right-hand modifiers also trigger",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_RIGHTCTRL, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_RIGHTALT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: true,
+		},
+		{
+			name: "ctrl+esc without alt does not trigger",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: false,
+		},
+		{
+			name: "alt+esc without ctrl does not trigger",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: false,
+		},
+		{
+			name: "esc alone does not trigger",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: false,
+		},
+		{
+			name: "release of esc does not retrigger",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 0},
+			},
+			wantBreak: true, // first press is the trigger; release must not retrigger
+		},
+		{
+			name: "non-key events between modifiers are ignored",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 1},
+				{Type: evdev.EV_REL, Code: 0, Value: 1}, // mouse-move-shaped noise
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &modifierState{}
+			gotBreak := false
+			for _, ev := range tt.events {
+				state.update(ev)
+				if state.isBreakEvent(ev) {
+					gotBreak = true
+				}
+			}
+			if gotBreak != tt.wantBreak {
+				t.Errorf("break detected = %v, want %v", gotBreak, tt.wantBreak)
+			}
+		})
 	}
 }

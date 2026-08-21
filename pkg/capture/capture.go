@@ -90,6 +90,12 @@ type session struct {
 	mu     sync.Mutex
 	grabs  map[string]*evdev.InputDevice
 	logger *slog.Logger
+
+	// cancel terminates the run context, used by the break-out combo
+	// handler to release the session from the keyboard. Set in Run
+	// before any drain goroutine is started, so no synchronization
+	// is required for the read in drainLoop.
+	cancel context.CancelFunc
 }
 
 // Devices returns the paths of every device currently held. The order
@@ -109,39 +115,110 @@ func (s *session) Devices() []string {
 // queue does not grow unbounded, and so the firmware of certain
 // keyboards (e.g., Logitech G512) does not see an unresponsive host —
 // which would otherwise get the firmware's autorepeat state stuck and
-// cause release events to be lost. Events are read and discarded;
-// there is no event processing in the skeleton.
+// cause release events to be lost. Events are read and discarded,
+// except for the "break out" combo (Ctrl+Alt+Esc) which causes Run to
+// return immediately so the parent can stop babysafe from the keyboard
+// — every other conventional exit signal (Ctrl+C, Ctrl+Alt+F2, etc.)
+// is eaten by the grab before it can reach the terminal.
 func (s *session) Run(ctx context.Context) error {
-	s.mu.Lock()
-	for _, dev := range s.grabs {
-		s.startDrain(dev)
-	}
-	s.mu.Unlock()
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	defer cancel()
 
-	<-ctx.Done()
-	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+	for _, dev := range s.grabs {
+		s.startDrain(runCtx, dev)
+	}
+
+	<-runCtx.Done()
+	if err := runCtx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("session context: %w", err)
 	}
 	return nil
 }
 
-// startDrain launches a goroutine that reads events from dev and
-// discards them. The goroutine exits when ReadOne returns an error —
-// typically because the device was closed by Close(). Any other error
-// is logged at debug level so it can be diagnosed without making the
-// happy path noisy.
-func (s *session) startDrain(dev *evdev.InputDevice) {
-	go func() {
-		for {
-			if _, err := dev.ReadOne(); err != nil {
-				if !errors.Is(err, os.ErrClosed) {
-					s.logger.Debug("event drain ended unexpectedly",
-						"path", dev.Path(), "err", err)
-				}
-				return
-			}
+// startDrain launches a goroutine that reads events from dev, watching
+// for the break-out combo. The goroutine exits when ReadOne returns an
+// error — typically because the device was closed by Close() — or
+// after triggering the break-out combo. Other read errors are logged
+// at debug level so they can be diagnosed without making the happy
+// path noisy.
+func (s *session) startDrain(ctx context.Context, dev *evdev.InputDevice) {
+	go s.drainLoop(ctx, dev)
+}
+
+// drainLoop is the per-device event-reading loop. It tracks modifier
+// state and triggers the break-out combo on Ctrl+Alt+Esc.
+func (s *session) drainLoop(ctx context.Context, dev *evdev.InputDevice) {
+	state := &modifierState{}
+	for {
+		if ctx.Err() != nil {
+			return
 		}
-	}()
+		ev, err := dev.ReadOne()
+		if err != nil {
+			if !errors.Is(err, os.ErrClosed) {
+				s.logger.Debug("event drain ended unexpectedly",
+					"path", dev.Path(), "err", err)
+			}
+			return
+		}
+		if ev.Type != evdev.EV_KEY {
+			continue
+		}
+		state.update(ev)
+		if state.isBreakEvent(ev) {
+			s.logger.Info("break combo detected, releasing session",
+				"path", dev.Path())
+			if s.cancel != nil {
+				s.cancel()
+			}
+			return
+		}
+	}
+}
+
+// modifierState tracks the up/down state of keyboard modifier keys
+// (Ctrl, Alt, Shift, Meta) for the purpose of detecting a "break out
+// of babysafe" combo. It is updated by feeding EV_KEY events into
+// update(), and consulted via isBreakEvent() to check whether the
+// current modifier state plus an event matches the break combo.
+type modifierState struct {
+	ctrl  bool
+	alt   bool
+	shift bool
+	meta  bool
+}
+
+// update records the up/down state of modifier keys from ev. Non-key
+// events are ignored, as are non-modifier keys.
+func (m *modifierState) update(ev *evdev.InputEvent) {
+	if ev.Type != evdev.EV_KEY {
+		return
+	}
+	isDown := ev.Value == 1
+	switch ev.Code {
+	case evdev.KEY_LEFTCTRL, evdev.KEY_RIGHTCTRL:
+		m.ctrl = isDown
+	case evdev.KEY_LEFTALT, evdev.KEY_RIGHTALT:
+		m.alt = isDown
+	case evdev.KEY_LEFTSHIFT, evdev.KEY_RIGHTSHIFT:
+		m.shift = isDown
+	case evdev.KEY_LEFTMETA, evdev.KEY_RIGHTMETA:
+		m.meta = isDown
+	}
+}
+
+// isBreakEvent returns true if ev is a key-press event that, combined
+// with the current modifier state, matches the babysafe "break out"
+// combo: Ctrl+Alt+Esc. The break combo gives the parent a way to stop
+// babysafe from the keyboard, since EVIOCGRAB eats every other
+// signal (Ctrl+C, Ctrl+Alt+F2, etc.) before it can reach the
+// terminal.
+func (m *modifierState) isBreakEvent(ev *evdev.InputEvent) bool {
+	if ev.Type != evdev.EV_KEY || ev.Value != 1 {
+		return false
+	}
+	return m.ctrl && m.alt && ev.Code == evdev.KEY_ESC
 }
 
 // Close releases every grabbed device. Safe to call repeatedly.
