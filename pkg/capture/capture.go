@@ -215,11 +215,17 @@ type modifierState struct {
 
 // update records the up/down state of modifier keys from ev. Non-key
 // events are ignored, as are non-modifier keys.
+//
+// Note: the kernel sends autorepeat events as ev.Value == 2, *not* as
+// repeats of ev.Value == 1. A "is down" check that only matches 1
+// would treat autorepeat as a release, which clears the modifier
+// state mid-hold and breaks detection of combos pressed while a
+// modifier is being held. Anything non-zero means the key is held.
 func (m *modifierState) update(ev *evdev.InputEvent) {
 	if ev.Type != evdev.EV_KEY {
 		return
 	}
-	isDown := ev.Value == 1
+	isDown := ev.Value != 0
 	switch ev.Code {
 	case evdev.KEY_LEFTCTRL, evdev.KEY_RIGHTCTRL:
 		m.ctrl = isDown

@@ -138,6 +138,34 @@ func TestEchoDecoder(t *testing.T) {
 			},
 			want: "",
 		},
+		{
+			name: "shift autorepeat keeps shift down",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTSHIFT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTSHIFT, Value: 2}, // autorepeat
+				{Type: evdev.EV_KEY, Code: evdev.KEY_K, Value: 1},
+			},
+			want: "K",
+		},
+		{
+			name: "letter autorepeat prints the held character",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_K, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_K, Value: 2},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_K, Value: 2},
+			},
+			want: "kkk",
+		},
+		{
+			name: "shift release after autorepeat puts us back to lowercase",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTSHIFT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTSHIFT, Value: 2}, // autorepeat
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTSHIFT, Value: 0},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_K, Value: 1},
+			},
+			want: "k",
+		},
 	}
 
 	for _, tt := range tests {

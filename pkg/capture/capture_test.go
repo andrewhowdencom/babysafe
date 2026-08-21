@@ -245,6 +245,33 @@ func TestModifierState(t *testing.T) {
 			},
 			wantBreak: true,
 		},
+		{
+			// The kernel sends autorepeat (Value=2) for held keys.
+			// A modifier that has been "released" by an autorepeat
+			// event wouldn't be recognized as held, so the combo
+			// would never fire while a key is being held.
+			name: "ctrl held through autorepeat still triggers with alt+esc",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 2}, // autorepeat
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 2}, // autorepeat
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: true,
+		},
+		{
+			// Conversely, autorepeat must not spuriously trigger
+			// the combo when only one modifier is held.
+			name: "ctrl autorepeat alone does not trigger",
+			events: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 1},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 2},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTCTRL, Value: 2},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_ESC, Value: 1},
+			},
+			wantBreak: false,
+		},
 	}
 
 	for _, tt := range tests {
