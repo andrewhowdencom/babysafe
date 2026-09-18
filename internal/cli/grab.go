@@ -96,9 +96,7 @@ Press Ctrl+Alt+Esc to release the session.`,
 			}()
 
 			paths := sess.Devices()
-			fmt.Fprintf(cmd.OutOrStdout(),
-				"babysafe: holding %d device(s); press Ctrl-C to release.\n",
-				len(paths))
+			fmt.Fprint(cmd.OutOrStdout(), holdingMessage(len(paths)))
 			for _, p := range paths {
 				fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", p)
 			}
@@ -114,6 +112,13 @@ Press Ctrl+Alt+Esc to release the session.`,
 		"Print each key event to stdout as the user would type it. Default true; pass --echo=false to disable.")
 
 	return cmd
+}
+
+func holdingMessage(deviceCount int) string {
+	return fmt.Sprintf(
+		"babysafe: holding %d device(s); press Ctrl+Alt+Esc to release.\n",
+		deviceCount,
+	)
 }
 
 // joinTypes re-used by list.go — keep a local alias so neither file
