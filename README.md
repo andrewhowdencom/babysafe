@@ -29,8 +29,9 @@ sudo babysafe grab \
   --exclude path=/dev/input/event0
 ```
 
-To stop a session, press `Ctrl-C` (SIGINT) or send `SIGTERM`. Every grabbed
-device is released before the process exits.
+To stop a session from a grabbed keyboard, press `Ctrl+Alt+Esc`. You can also
+send `SIGINT` or `SIGTERM` from another terminal. Every grabbed device is
+released before the process exits.
 
 ## Commands
 
