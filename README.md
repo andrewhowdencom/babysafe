@@ -33,6 +33,11 @@ To stop a session from a grabbed keyboard, press `Ctrl+Alt+Esc`. You can also
 send `SIGINT` or `SIGTERM` from another terminal. Every grabbed device is
 released before the process exits.
 
+While a session is active in a terminal, every key press creates a colorful
+full-screen burst around the key. Use `--animate=false` to keep the plain key
+stream, or `--echo=false` as well for quiet operation. Output redirected to a
+file or pipe stays plain automatically.
+
 ## Commands
 
 | Command   | Description                                       |

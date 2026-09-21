@@ -26,6 +26,7 @@ func newGrabCmd() *cobra.Command {
 	var matchExprs []string
 	var excludeExprs []string
 	var echo bool
+	var animate bool
 
 	cmd := &cobra.Command{
 		Use:   "grab",
@@ -43,12 +44,13 @@ the form key=value:
 A device is grabbed when every --match succeeds and no --exclude
 succeeds. With no filters, every readable input device is grabbed.
 
-By default, the keys the grab catches are decoded and printed to
-stdout as they would appear at the keyboard — useful for seeing
-what a child is typing without releasing the grab. Special keys
-(Enter, Tab, arrow keys, F-keys, …) are shown as bracketed names
-like [ENTER]. The decoder assumes a US keyboard layout; non-US
-layouts will mis-decode. Pass --echo=false to suppress this output.
+In a terminal, each key press creates a colorful full-screen animation.
+Pass --animate=false for plain output instead. In plain output, keys are
+decoded and printed as they would appear at the keyboard. Special keys
+(Enter, Tab, arrow keys, F-keys, …) are shown as bracketed names like
+[ENTER]. The decoder assumes a US keyboard layout; non-US layouts will
+mis-decode. Redirected output is always plain. Pass --echo=false to
+suppress plain key output.
 Press Ctrl+Alt+Esc to release the session.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -66,15 +68,20 @@ Press Ctrl+Alt+Esc to release the session.`,
 				return err
 			}
 
+			output := cmd.OutOrStdout()
+			var animator *keyAnimator
 			var onEvent func(*evdev.InputEvent)
-			if echo {
+			if animate && isTerminal(output) {
+				animator = newKeyAnimator(output)
+				onEvent = animator.handle
+			} else if echo {
 				d := &echoDecoder{}
 				onEvent = func(ev *evdev.InputEvent) {
 					if s := d.feed(ev); s != "" {
 						// Write to the command's stdout so the
 						// output is redirectable / testable like
 						// any other CLI tool's output.
-						fmt.Fprint(cmd.OutOrStdout(), s)
+						fmt.Fprint(output, s)
 					}
 				}
 			}
@@ -96,9 +103,14 @@ Press Ctrl+Alt+Esc to release the session.`,
 			}()
 
 			paths := sess.Devices()
-			fmt.Fprint(cmd.OutOrStdout(), holdingMessage(len(paths)))
+			fmt.Fprint(output, holdingMessage(len(paths)))
 			for _, p := range paths {
-				fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", p)
+				fmt.Fprintf(output, "  - %s\n", p)
+			}
+
+			if animator != nil {
+				animator.start()
+				defer animator.close()
 			}
 
 			return sess.Run(ctx)
@@ -109,7 +121,9 @@ Press Ctrl+Alt+Esc to release the session.`,
 	cmd.Flags().StringSliceVar(&excludeExprs, "exclude", nil,
 		"Exclude expression (key=value, repeatable). Same syntax as --match.")
 	cmd.Flags().BoolVar(&echo, "echo", true,
-		"Print each key event to stdout as the user would type it. Default true; pass --echo=false to disable.")
+		"Print each key event in plain-output mode. Default true; pass --echo=false to disable.")
+	cmd.Flags().BoolVar(&animate, "animate", true,
+		"Show colorful full-screen animations for key presses when stdout is a terminal.")
 
 	return cmd
 }
