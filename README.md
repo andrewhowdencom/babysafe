@@ -29,16 +29,23 @@ sudo babysafe grab \
   --exclude path=/dev/input/event0
 ```
 
-To stop a session from a grabbed keyboard, press `Ctrl+Alt+Esc`. You can also
-send `SIGINT` or `SIGTERM` from another terminal. Every grabbed device is
-released before the process exits.
+`grab` requires an interactive, color-capable terminal. Each initial keyboard
+press creates a short, colorful effect that bounces around the screen alongside
+other recent presses. Effects are capped at 64; releases and key autorepeat do
+not create more effects. Printable characters use a US keyboard layout, while
+modifier, navigation, function, lock, and media keys use named labels.
+
+To stop a session from a grabbed keyboard, press `Ctrl+Alt+Esc`. This instruction
+remains visible throughout the animation. You can also send `SIGINT` or
+`SIGTERM` from another terminal. Every grabbed device is released and the
+previous terminal screen and cursor are restored before the process exits.
 
 ## Commands
 
 | Command   | Description                                       |
 | --------- | ------------------------------------------------- |
 | `list`    | List input devices and their detected types.      |
-| `grab`    | Grab devices matching the supplied filters.       |
+| `grab`    | Grab devices and animate initial keyboard presses. |
 | `version` | Print the babysafe version and exit.              |
 
 `grab` accepts repeatable `--match` and `--exclude` flags of the form
@@ -62,6 +69,7 @@ exclusively. There is no portable equivalent.
 
 ```
 cmd/babysafe/main.go      Entry point. Minimal.
+internal/animation/       Keyboard normalization and terminal animation.
 internal/cli/             Cobra command tree (root, list, grab, version).
 internal/version/         Build-time version stamp.
 pkg/capture/              Linux input-grab primitives (importable as a Go library).
@@ -87,6 +95,16 @@ task build:linux # Same, but force GOOS=linux.
 task run         # `go run ./cmd/babysafe` (honours `CLI_ARGS`).
 task clean       # Remove build artifacts.
 ```
+
+### Manual animation smoke test
+
+On Linux, run `sudo babysafe grab --match type=keyboard` and verify:
+
+- printable, modifier, navigation, function, and media keys animate;
+- rapid mixed presses remain responsive and produce layered effects;
+- holding a key produces only one effect;
+- `Ctrl+Alt+Esc` exits; and
+- the previous screen and visible cursor are restored.
 
 ## License
 

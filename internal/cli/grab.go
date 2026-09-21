@@ -2,36 +2,52 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
-
-	"github.com/spf13/cobra"
+	"io"
 
 	evdev "github.com/holoplot/go-evdev"
+	"github.com/spf13/cobra"
 
+	"github.com/andrewhowdencom/babysafe/internal/animation"
 	"github.com/andrewhowdencom/babysafe/pkg/capture"
 )
 
-// newGrabCmd is the workhorse command: grab every input device that
-// matches the supplied --match / --exclude expressions and hold them
-// until the process is signalled. Match expressions are repeatable;
-// all --match rules must be satisfied and no --exclude rule may be.
-//
-// Examples (see --help for the full list):
-//
-//	sudo babysafe grab --match type=keyboard
-//	sudo babysafe grab --match name=Logitech
-//	sudo babysafe grab --match path=/dev/input/by-id/usb-Logitech_*-event-kbd
+type grabRenderer interface {
+	Submit(*evdev.InputEvent)
+	Run(context.Context) error
+	Close() error
+}
+
+type grabDependencies struct {
+	newRenderer func(io.Writer) (grabRenderer, error)
+	newSession  func(context.Context, capture.Options) (capture.Session, error)
+}
+
+func defaultGrabDependencies() grabDependencies {
+	return grabDependencies{
+		newRenderer: func(output io.Writer) (grabRenderer, error) {
+			return animation.NewRenderer(output)
+		},
+		newSession: capture.NewSession,
+	}
+}
+
+// newGrabCmd is the workhorse command: grab every input device that matches
+// the supplied filters and animate initial keyboard presses until release.
 func newGrabCmd() *cobra.Command {
+	return newGrabCmdWithDependencies(defaultGrabDependencies())
+}
+
+func newGrabCmdWithDependencies(dependencies grabDependencies) *cobra.Command {
 	var matchExprs []string
 	var excludeExprs []string
-	var echo bool
 
 	cmd := &cobra.Command{
 		Use:   "grab",
-		Short: "Grab input devices and hold them until interrupted.",
-		Long: `Grab Linux input devices and hold them until the process receives
-SIGINT / SIGTERM.
+		Short: "Grab input devices and turn key presses into animations.",
+		Long: `Grab Linux input devices and show each initial keyboard press as a
+colorful, bouncing animation until the process receives SIGINT / SIGTERM.
 
 Filters are written as repeatable --match and --exclude expressions of
 the form key=value:
@@ -43,12 +59,9 @@ the form key=value:
 A device is grabbed when every --match succeeds and no --exclude
 succeeds. With no filters, every readable input device is grabbed.
 
-By default, the keys the grab catches are decoded and printed to
-stdout as they would appear at the keyboard — useful for seeing
-what a child is typing without releasing the grab. Special keys
-(Enter, Tab, arrow keys, F-keys, …) are shown as bracketed names
-like [ENTER]. The decoder assumes a US keyboard layout; non-US
-layouts will mis-decode. Pass --echo=false to suppress this output.
+Animation requires an interactive, color-capable terminal. Printable keys use
+a US keyboard layout; special, media, and modifier keys use named labels.
+Holding a key creates one effect: releases and autorepeat do not create effects.
 Press Ctrl+Alt+Esc to release the session.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -66,61 +79,64 @@ Press Ctrl+Alt+Esc to release the session.`,
 				return err
 			}
 
-			var onEvent func(*evdev.InputEvent)
-			if echo {
-				d := &echoDecoder{}
-				onEvent = func(ev *evdev.InputEvent) {
-					if s := d.feed(ev); s != "" {
-						// Write to the command's stdout so the
-						// output is redirectable / testable like
-						// any other CLI tool's output.
-						fmt.Fprint(cmd.OutOrStdout(), s)
-					}
-				}
-			}
-
-			logger := LoggerFromContext(ctx)
-			sess, err := capture.NewSession(ctx, capture.Options{
-				Matchers: matchers,
-				Excludes: excludes,
-				Logger:   logger,
-				OnEvent:  onEvent,
-			})
+			// Renderer construction performs terminal preflight without emitting
+			// escape sequences. It must happen before NewSession grabs devices.
+			renderer, err := dependencies.newRenderer(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if cerr := sess.Close(context.Background()); cerr != nil {
-					cmd.PrintErrf("release: %v\n", cerr)
-				}
-			}()
 
-			paths := sess.Devices()
-			fmt.Fprint(cmd.OutOrStdout(), holdingMessage(len(paths)))
-			for _, p := range paths {
-				fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", p)
+			session, err := dependencies.newSession(ctx, capture.Options{
+				Matchers: matchers,
+				Excludes: excludes,
+				Logger:   LoggerFromContext(ctx),
+				OnEvent:  renderer.Submit,
+			})
+			if err != nil {
+				return errors.Join(err, renderer.Close())
 			}
 
-			return sess.Run(ctx)
+			return runGrab(ctx, renderer, session)
 		},
 	}
 	cmd.Flags().StringSliceVar(&matchExprs, "match", nil,
 		"Match expression (key=value, repeatable). Keys: path, name, type.")
 	cmd.Flags().StringSliceVar(&excludeExprs, "exclude", nil,
 		"Exclude expression (key=value, repeatable). Same syntax as --match.")
-	cmd.Flags().BoolVar(&echo, "echo", true,
-		"Print each key event to stdout as the user would type it. Default true; pass --echo=false to disable.")
-
 	return cmd
 }
 
-func holdingMessage(deviceCount int) string {
-	return fmt.Sprintf(
-		"babysafe: holding %d device(s); press Ctrl+Alt+Esc to release.\n",
-		deviceCount,
-	)
+type grabResult struct {
+	component string
+	err       error
 }
 
-// joinTypes re-used by list.go — keep a local alias so neither file
-// owns the helper.
-var _ = strings.Join
+func runGrab(ctx context.Context, renderer grabRenderer, session capture.Session) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan grabResult, 2)
+	go func() { results <- grabResult{component: "animation", err: renderer.Run(runCtx)} }()
+	go func() { results <- grabResult{component: "capture", err: session.Run(runCtx)} }()
+
+	first := <-results
+	cancel()
+	second := <-results
+
+	closeErr := session.Close(context.WithoutCancel(ctx))
+	restoreErr := renderer.Close()
+
+	var runErrors []error
+	for _, result := range []grabResult{first, second} {
+		if result.err != nil && !errors.Is(result.err, context.Canceled) {
+			runErrors = append(runErrors, fmt.Errorf("%s: %w", result.component, result.err))
+		}
+	}
+	if closeErr != nil {
+		runErrors = append(runErrors, fmt.Errorf("release devices: %w", closeErr))
+	}
+	if restoreErr != nil {
+		runErrors = append(runErrors, fmt.Errorf("restore terminal: %w", restoreErr))
+	}
+	return errors.Join(runErrors...)
+}

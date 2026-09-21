@@ -48,8 +48,8 @@ type Options struct {
 	// from a grabbed device, in the order it is read. It runs on the
 	// drain goroutine, so a slow handler will delay event
 	// consumption (and may keep the kernel event queue from being
-	// drained in real time). The capture package still processes the
-	// break-out combo internally before invoking OnEvent.
+	// drained in real time). Break-out detection remains internal and
+	// does not depend on the callback.
 	OnEvent func(*evdev.InputEvent)
 }
 
@@ -180,8 +180,7 @@ func (s *session) drainLoop(ctx context.Context, dev *evdev.InputDevice) {
 			}
 			return
 		}
-		// Hand the raw event off first so any consumer that wants to
-		// observe every event (e.g. an --echo printer) sees the same
+		// Hand the raw event off first so any consumer sees the same
 		// stream that the break-out detector sees.
 		if s.onEvent != nil {
 			s.onEvent(ev)
