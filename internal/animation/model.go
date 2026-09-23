@@ -7,7 +7,12 @@ import (
 	"unicode/utf8"
 )
 
-const defaultEffectLimit = 64
+const (
+	defaultEffectLimit = 64
+	launchDuration     = 550 * time.Millisecond
+	burstDuration      = 1500 * time.Millisecond
+	particleCount      = 16
+)
 
 var brightColors = [...]int{91, 92, 93, 94, 95, 96, 97}
 
@@ -15,13 +20,18 @@ type randomSource interface {
 	Intn(int) int
 }
 
+type particle struct {
+	vx, vy float64
+	color  int
+}
+
 type effect struct {
-	label    string
-	x, y     float64
-	vx, vy   float64
-	age      time.Duration
-	lifetime time.Duration
-	color    int
+	label     string
+	x, y      float64 // Center of the burst.
+	launchY   float64
+	age       time.Duration
+	color     int
+	particles [particleCount]particle
 }
 
 type sprite struct {
@@ -53,8 +63,7 @@ func (m *model) resize(width, height int) {
 }
 
 func (m *model) spawn(token Token) {
-	label := token.Label
-	if label == "" {
+	if token.Label == "" {
 		return
 	}
 	if len(m.effects) == m.limit {
@@ -62,16 +71,26 @@ func (m *model) spawn(token Token) {
 		m.effects = m.effects[:m.limit-1]
 	}
 
-	maxX := max(0, m.width-utf8.RuneCountInString(label))
-	maxY := max(0, m.height-1)
+	maxX := max(0, m.width-utf8.RuneCountInString(token.Label))
+	// Keep the burst away from the edges when the terminal has room.
+	marginX := min(m.width/5, maxX/2)
+	minY := m.height / 5
+	maxY := max(minY, m.height/2)
 	e := effect{
-		label:    label,
-		x:        float64(randomCoordinate(m.random, maxX)),
-		y:        float64(randomCoordinate(m.random, maxY)),
-		vx:       signedSpeed(m.random, 8, 13),
-		vy:       signedSpeed(m.random, 3, 6),
-		lifetime: time.Duration(1800+m.random.Intn(1201)) * time.Millisecond,
-		color:    brightColors[m.random.Intn(len(brightColors))],
+		label:   token.Label,
+		x:       float64(marginX + randomCoordinate(m.random, maxX-2*marginX)),
+		y:       float64(minY + randomCoordinate(m.random, maxY-minY)),
+		launchY: float64(m.height - 1),
+		color:   brightColors[m.random.Intn(len(brightColors))],
+	}
+	for i := range e.particles {
+		angle := 2 * math.Pi * float64(i) / particleCount
+		speed := float64(12 + m.random.Intn(9))
+		e.particles[i] = particle{
+			vx:    math.Cos(angle) * speed * 1.6,
+			vy:    math.Sin(angle) * speed * 0.65,
+			color: brightColors[m.random.Intn(len(brightColors))],
+		}
 	}
 	m.effects = append(m.effects, e)
 }
@@ -83,59 +102,62 @@ func randomCoordinate(random randomSource, maximum int) int {
 	return random.Intn(maximum + 1)
 }
 
-func signedSpeed(random randomSource, minimum, spread int) float64 {
-	speed := float64(minimum + random.Intn(spread))
-	if random.Intn(2) == 0 {
-		return -speed
-	}
-	return speed
-}
-
 func (m *model) advance(elapsed time.Duration) {
-	seconds := elapsed.Seconds()
+	if elapsed < 0 {
+		return
+	}
 	live := m.effects[:0]
-	for i := range m.effects {
-		e := m.effects[i]
+	for _, e := range m.effects {
 		e.age += elapsed
-		if e.age >= e.lifetime {
-			continue
+		if e.age < launchDuration+burstDuration {
+			live = append(live, e)
 		}
-		maxX := float64(max(0, m.width-utf8.RuneCountInString(e.label)))
-		maxY := float64(max(0, m.height-1))
-		e.x, e.vx = bounce(e.x+e.vx*seconds, e.vx, maxX)
-		e.y, e.vy = bounce(e.y+e.vy*seconds, e.vy, maxY)
-		live = append(live, e)
 	}
 	m.effects = live
 }
 
-func bounce(position, velocity, maximum float64) (float64, float64) {
-	if maximum <= 0 {
-		return 0, velocity
-	}
-
-	wrapped := math.Mod(position, 2*maximum)
-	if wrapped < 0 {
-		wrapped += 2 * maximum
-	}
-	direction := math.Copysign(1, velocity)
-	if wrapped > maximum {
-		return 2*maximum - wrapped, -math.Abs(velocity) * direction
-	}
-	return wrapped, math.Abs(velocity) * direction
-}
-
 func (m *model) clamp(e *effect) {
 	maxX := float64(max(0, m.width-utf8.RuneCountInString(e.label)))
-	maxY := float64(max(0, m.height-1))
+	maxY := float64(m.height - 1)
 	e.x = min(max(0, e.x), maxX)
 	e.y = min(max(0, e.y), maxY)
+	e.launchY = min(max(0, e.launchY), maxY)
 }
 
 func (m *model) frame() []sprite {
-	frame := make([]sprite, len(m.effects))
-	for i, e := range m.effects {
-		frame[i] = sprite{label: e.label, x: int(e.x), y: int(e.y), color: e.color}
+	frame := make([]sprite, 0, len(m.effects)*(particleCount+4))
+	for _, e := range m.effects {
+		x := int(math.Round(e.x))
+		if e.age < launchDuration {
+			progress := float64(e.age) / float64(launchDuration)
+			y := int(math.Round(e.launchY + (e.y-e.launchY)*progress))
+			for offset, glyph := range []string{"✦", "+", "·"} {
+				if y+offset+1 < m.height {
+					frame = append(frame, sprite{label: glyph, x: x, y: y + offset + 1, color: e.color})
+				}
+			}
+			frame = append(frame, sprite{label: e.label, x: x, y: y, color: e.color})
+			continue
+		}
+
+		seconds := (e.age - launchDuration).Seconds()
+		for _, p := range e.particles {
+			px := int(math.Round(e.x + p.vx*seconds))
+			py := int(math.Round(e.y + p.vy*seconds + 5*seconds*seconds))
+			if px < 0 || px >= m.width || py < 0 || py >= m.height {
+				continue
+			}
+			glyph := "✦"
+			if seconds > 0.45 {
+				glyph = "*"
+			}
+			if seconds > 0.95 {
+				glyph = "·"
+			}
+			frame = append(frame, sprite{label: glyph, x: px, y: py, color: p.color})
+		}
+		// Keep the key visible at the heart of the firework while sparks expand.
+		frame = append(frame, sprite{label: e.label, x: x, y: int(math.Round(e.y)), color: e.color})
 	}
 	return frame
 }

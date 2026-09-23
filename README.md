@@ -30,10 +30,11 @@ sudo babysafe grab \
 ```
 
 `grab` requires an interactive, color-capable terminal. Each initial keyboard
-press creates a short, colorful effect that bounces around the screen alongside
-other recent presses. Effects are capped at 64; releases and key autorepeat do
-not create more effects. Printable characters use a US keyboard layout, while
-modifier, navigation, function, lock, and media keys use named labels.
+press launches its letter or key label upward, then bursts into colorful sparks
+alongside other recent presses. Effects are capped at 64; releases and key
+autorepeat do not create more effects. Printable characters use a US keyboard
+layout, while modifier, navigation, function, lock, and media keys use named
+labels.
 
 To stop a session from a grabbed keyboard, press `Ctrl+Alt+Esc`. This instruction
 remains visible throughout the animation. You can also send `SIGINT` or

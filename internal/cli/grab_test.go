@@ -43,7 +43,7 @@ func TestGrabHelpDescribesAnimationAndHasNoEcho(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "colorful, bouncing animation") {
+	if !strings.Contains(output.String(), "colorful firework animation") {
 		t.Fatalf("help omitted animation description:\n%s", output.String())
 	}
 	if strings.Contains(output.String(), "--echo") {
