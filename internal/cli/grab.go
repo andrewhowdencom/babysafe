@@ -47,7 +47,7 @@ func newGrabCmdWithDependencies(dependencies grabDependencies) *cobra.Command {
 		Use:   "grab",
 		Short: "Grab input devices and turn key presses into animations.",
 		Long: `Grab Linux input devices and show each initial keyboard press as a
-colorful, bouncing animation until the process receives SIGINT / SIGTERM.
+colorful firework animation until the process receives SIGINT / SIGTERM.
 
 Filters are written as repeatable --match and --exclude expressions of
 the form key=value:
