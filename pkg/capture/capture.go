@@ -77,6 +77,7 @@ func NewSession(ctx context.Context, opts Options) (Session, error) {
 		grabs:       make(map[string]*evdev.InputDevice),
 		virtuals:    make(map[string]*evdev.InputDevice),
 		excludeKeys: opts.ExcludeKeys,
+		forwardable: make(map[evdev.EvCode]bool),
 		onEvent:     opts.OnEvent,
 	}
 	for _, dev := range devs {
@@ -99,6 +100,12 @@ func NewSession(ctx context.Context, opts Options) (Session, error) {
 	if len(s.grabs) == 0 {
 		return nil, errors.New("no devices matched the requested filters")
 	}
+	for code, enabled := range opts.ExcludeKeys {
+		if enabled && !s.forwardable[code] {
+			_ = s.Close(ctx)
+			return nil, fmt.Errorf("excluded key %s is not advertised by any grabbed device", evdev.CodeName(evdev.EV_KEY, code))
+		}
+	}
 
 	return s, nil
 }
@@ -109,6 +116,7 @@ type session struct {
 	grabs       map[string]*evdev.InputDevice
 	virtuals    map[string]*evdev.InputDevice
 	excludeKeys map[evdev.EvCode]bool
+	forwardable map[evdev.EvCode]bool
 	logger      *slog.Logger
 
 	// cancel terminates the run context, used by the break-out combo
@@ -329,15 +337,15 @@ func (s *session) openAndGrab(path string) error {
 	}
 
 	var virtual *evdev.InputDevice
+	var codes []evdev.EvCode
 	if len(s.excludeKeys) != 0 {
-		var codes []evdev.EvCode
 		for _, code := range dev.CapableEvents(evdev.EV_KEY) {
 			if s.excludeKeys[code] {
 				codes = append(codes, code)
 			}
 		}
 		if len(codes) != 0 {
-			virtual, err = evdev.CreateDevice("babysafe excluded keys", evdev.InputID{BusType: 0x03}, map[evdev.EvType][]evdev.EvCode{evdev.EV_KEY: codes})
+			virtual, err = evdev.CreateDevice("babysafe excluded keys", evdev.InputID{BusType: 0x03}, map[evdev.EvType][]evdev.EvCode{evdev.EV_KEY: virtualKeyboardCodes(codes)})
 			if err != nil {
 				_ = dev.Close()
 				return fmt.Errorf("create virtual input device for %s: %w (requires /dev/uinput)", path, err)
@@ -358,6 +366,9 @@ func (s *session) openAndGrab(path string) error {
 	s.grabs[path] = dev
 	if virtual != nil {
 		s.virtuals[path] = virtual
+		for _, code := range codes {
+			s.forwardable[code] = true
+		}
 	}
 	s.mu.Unlock()
 
