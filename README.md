@@ -27,6 +27,9 @@ sudo babysafe grab --match path=/dev/input/by-id/usb-Logitech_*-event-kbd
 sudo babysafe grab \
   --match type=keyboard \
   --exclude path=/dev/input/event0
+
+# Keep F13 available to host hotkeys while grabbing the keyboard.
+sudo babysafe grab --match type=keyboard --exclude-key key_f13
 ```
 
 `grab` requires an interactive, color-capable terminal. Each initial keyboard
@@ -57,6 +60,14 @@ previous terminal screen and cursor are restored before the process exits.
 | `path` | `/dev/input/by-id/usb-Logitech_*-event-kbd`         | Glob against the device path (symlinks resolved).|
 | `name` | `Logitech G512`                                     | Case-insensitive substring of `EVIOCGNAME`.      |
 | `type` | `keyboard` \| `mouse` \| `touchpad` \| `gamepad` \| `other` | Match a category inferred from capabilities. |
+
+`--exclude-key` accepts repeatable Linux `KEY_*` names, case-insensitively.
+Excluded keys are forwarded through a virtual input device, so `/dev/uinput`
+must be available and writable. This forwards presses, releases, and repeats.
+Excluded keys do not create animations.
+For a chord such as Ctrl+F13, exclude its modifier keys too (for example,
+`--exclude-key key_leftctrl --exclude-key key_f13`). Those modifiers will then
+also reach the host when pressed on their own.
 
 `babysafe` itself accepts `--log-level debug|info|warn|error`.
 

@@ -42,10 +42,14 @@ type Session interface {
 type Options struct {
 	Matchers []Matcher
 	Excludes []Matcher
-	Logger   *slog.Logger // Optional; defaults to slog.Default().
 
-	// OnEvent, if non-nil, is invoked for every input event read
-	// from a grabbed device, in the order it is read. It runs on the
+	// ExcludeKeys are forwarded to the host through /dev/uinput while
+	// all other events from the selected devices remain captured.
+	ExcludeKeys map[evdev.EvCode]bool
+	Logger      *slog.Logger // Optional; defaults to slog.Default().
+
+	// OnEvent, if non-nil, is invoked for captured events other than
+	// excluded keys, in the order they are read. It runs on the
 	// drain goroutine, so a slow handler will delay event
 	// consumption (and may keep the kernel event queue from being
 	// drained in real time). Break-out detection remains internal and
@@ -69,9 +73,11 @@ func NewSession(ctx context.Context, opts Options) (Session, error) {
 	}
 
 	s := &session{
-		logger:  logger,
-		grabs:   make(map[string]*evdev.InputDevice),
-		onEvent: opts.OnEvent,
+		logger:      logger,
+		grabs:       make(map[string]*evdev.InputDevice),
+		virtuals:    make(map[string]*evdev.InputDevice),
+		excludeKeys: opts.ExcludeKeys,
+		onEvent:     opts.OnEvent,
 	}
 	for _, dev := range devs {
 		if !matchAll(dev, opts.Matchers) {
@@ -99,15 +105,18 @@ func NewSession(ctx context.Context, opts Options) (Session, error) {
 
 // session is the concrete Session implementation.
 type session struct {
-	mu     sync.Mutex
-	grabs  map[string]*evdev.InputDevice
-	logger *slog.Logger
+	mu          sync.Mutex
+	grabs       map[string]*evdev.InputDevice
+	virtuals    map[string]*evdev.InputDevice
+	excludeKeys map[evdev.EvCode]bool
+	logger      *slog.Logger
 
 	// cancel terminates the run context, used by the break-out combo
 	// handler to release the session from the keyboard. Set in Run
 	// before any drain goroutine is started, so no synchronization
 	// is required for the read in drainLoop.
 	cancel context.CancelFunc
+	runErr chan error
 
 	// onEvent is the per-event callback passed via Options. It is
 	// read-only after NewSession — multiple drain goroutines may
@@ -141,13 +150,18 @@ func (s *session) Devices() []string {
 func (s *session) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
+	s.runErr = make(chan error, 1)
 	defer cancel()
 
 	for _, dev := range s.grabs {
-		s.startDrain(runCtx, dev)
+		s.startDrain(runCtx, dev, s.virtuals[dev.Path()])
 	}
 
-	<-runCtx.Done()
+	select {
+	case err := <-s.runErr:
+		return err
+	case <-runCtx.Done():
+	}
 	if err := runCtx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("session context: %w", err)
 	}
@@ -160,13 +174,13 @@ func (s *session) Run(ctx context.Context) error {
 // after triggering the break-out combo. Other read errors are logged
 // at debug level so they can be diagnosed without making the happy
 // path noisy.
-func (s *session) startDrain(ctx context.Context, dev *evdev.InputDevice) {
-	go s.drainLoop(ctx, dev)
+func (s *session) startDrain(ctx context.Context, dev, virtual *evdev.InputDevice) {
+	go s.drainLoop(ctx, dev, virtual)
 }
 
 // drainLoop is the per-device event-reading loop. It tracks modifier
 // state and triggers the break-out combo on Ctrl+Alt+Esc.
-func (s *session) drainLoop(ctx context.Context, dev *evdev.InputDevice) {
+func (s *session) drainLoop(ctx context.Context, dev, virtual *evdev.InputDevice) {
 	state := &modifierState{}
 	for {
 		if ctx.Err() != nil {
@@ -180,9 +194,18 @@ func (s *session) drainLoop(ctx context.Context, dev *evdev.InputDevice) {
 			}
 			return
 		}
-		// Hand the raw event off first so any consumer sees the same
-		// stream that the break-out detector sees.
-		if s.onEvent != nil {
+		forward := virtual != nil && shouldForward(ev, s.excludeKeys)
+		if forward {
+			if err := virtual.WriteOne(ev); err != nil {
+				s.reportRunError(fmt.Errorf("forward key from %s: %w", dev.Path(), err))
+				return
+			}
+			if err := virtual.WriteOne(&evdev.InputEvent{Type: evdev.EV_SYN, Code: evdev.SYN_REPORT}); err != nil {
+				s.reportRunError(fmt.Errorf("sync forwarded key from %s: %w", dev.Path(), err))
+				return
+			}
+		}
+		if !forward && s.onEvent != nil {
 			s.onEvent(ev)
 		}
 		if ev.Type != evdev.EV_KEY {
@@ -198,6 +221,17 @@ func (s *session) drainLoop(ctx context.Context, dev *evdev.InputDevice) {
 			return
 		}
 	}
+}
+
+func (s *session) reportRunError(err error) {
+	select {
+	case s.runErr <- err:
+	default:
+	}
+}
+
+func shouldForward(ev *evdev.InputEvent, keys map[evdev.EvCode]bool) bool {
+	return ev.Type == evdev.EV_KEY && keys[ev.Code]
 }
 
 // modifierState tracks the up/down state of keyboard modifier keys
@@ -270,6 +304,15 @@ func (s *session) Close(_ context.Context) error {
 			}
 		}
 		delete(s.grabs, path)
+		if virtual := s.virtuals[path]; virtual != nil {
+			if err := evdev.DestroyDevice(virtual); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("destroy virtual device for %s: %w", path, err)
+			}
+			if err := virtual.Close(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("close virtual device for %s: %w", path, err)
+			}
+			delete(s.virtuals, path)
+		}
 	}
 	return firstErr
 }
@@ -285,13 +328,37 @@ func (s *session) openAndGrab(path string) error {
 		return fmt.Errorf("open %s: %w (root required)", path, err)
 	}
 
+	var virtual *evdev.InputDevice
+	if len(s.excludeKeys) != 0 {
+		var codes []evdev.EvCode
+		for _, code := range dev.CapableEvents(evdev.EV_KEY) {
+			if s.excludeKeys[code] {
+				codes = append(codes, code)
+			}
+		}
+		if len(codes) != 0 {
+			virtual, err = evdev.CreateDevice("babysafe excluded keys", evdev.InputID{BusType: 0x03}, map[evdev.EvType][]evdev.EvCode{evdev.EV_KEY: codes})
+			if err != nil {
+				_ = dev.Close()
+				return fmt.Errorf("create virtual input device for %s: %w (requires /dev/uinput)", path, err)
+			}
+		}
+	}
+
 	if err := dev.Grab(); err != nil {
+		if virtual != nil {
+			_ = evdev.DestroyDevice(virtual)
+			_ = virtual.Close()
+		}
 		_ = dev.Close()
 		return fmt.Errorf("grab %s: %w", path, err)
 	}
 
 	s.mu.Lock()
 	s.grabs[path] = dev
+	if virtual != nil {
+		s.virtuals[path] = virtual
+	}
 	s.mu.Unlock()
 
 	s.logger.Info("grabbed input device", "path", path)

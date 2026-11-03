@@ -42,6 +42,7 @@ func newGrabCmd() *cobra.Command {
 func newGrabCmdWithDependencies(dependencies grabDependencies) *cobra.Command {
 	var matchExprs []string
 	var excludeExprs []string
+	var excludeKeys []string
 
 	cmd := &cobra.Command{
 		Use:   "grab",
@@ -58,6 +59,10 @@ the form key=value:
 
 A device is grabbed when every --match succeeds and no --exclude
 succeeds. With no filters, every readable input device is grabbed.
+
+--exclude-key forwards named keys from grabbed devices to the host via
+/dev/uinput. Repeat it for multiple keys (e.g. --exclude-key key_f13).
+For a hotkey chord, also exclude the modifier keys it needs.
 
 Animation requires an interactive, color-capable terminal. Printable keys use
 a US keyboard layout; special, media, and modifier keys use named labels.
@@ -78,6 +83,10 @@ Press Ctrl+Alt+Esc to release the session.`,
 			if err != nil {
 				return err
 			}
+			keys, err := capture.ParseKeys(excludeKeys)
+			if err != nil {
+				return err
+			}
 
 			// Renderer construction performs terminal preflight without emitting
 			// escape sequences. It must happen before NewSession grabs devices.
@@ -87,10 +96,11 @@ Press Ctrl+Alt+Esc to release the session.`,
 			}
 
 			session, err := dependencies.newSession(ctx, capture.Options{
-				Matchers: matchers,
-				Excludes: excludes,
-				Logger:   LoggerFromContext(ctx),
-				OnEvent:  renderer.Submit,
+				Matchers:    matchers,
+				Excludes:    excludes,
+				ExcludeKeys: keys,
+				Logger:      LoggerFromContext(ctx),
+				OnEvent:     renderer.Submit,
 			})
 			if err != nil {
 				return errors.Join(err, renderer.Close())
@@ -103,6 +113,8 @@ Press Ctrl+Alt+Esc to release the session.`,
 		"Match expression (key=value, repeatable). Keys: path, name, type.")
 	cmd.Flags().StringSliceVar(&excludeExprs, "exclude", nil,
 		"Exclude expression (key=value, repeatable). Same syntax as --match.")
+	cmd.Flags().StringArrayVar(&excludeKeys, "exclude-key", nil,
+		"Forward a key to the host (repeatable; e.g. KEY_F13; requires /dev/uinput).")
 	return cmd
 }
 

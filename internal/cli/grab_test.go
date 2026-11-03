@@ -51,6 +51,29 @@ func TestGrabHelpDescribesAnimationAndHasNoEcho(t *testing.T) {
 	}
 }
 
+func TestGrabExcludeKeyPassesCodesToCapture(t *testing.T) {
+	var got capture.Options
+	command := newGrabCmdWithDependencies(grabDependencies{
+		newRenderer: func(io.Writer) (grabRenderer, error) {
+			return &fakeGrabRenderer{run: func(ctx context.Context) error {
+				<-ctx.Done()
+				return nil
+			}}, nil
+		},
+		newSession: func(_ context.Context, opts capture.Options) (capture.Session, error) {
+			got = opts
+			return &fakeCaptureSession{run: func(context.Context) error { return nil }}, nil
+		},
+	})
+	command.SetArgs([]string{"--exclude-key", "key_f13", "--exclude-key", "KEY_F14"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !got.ExcludeKeys[evdev.KEY_F13] || !got.ExcludeKeys[evdev.KEY_F14] {
+		t.Fatalf("excluded keys = %v", got.ExcludeKeys)
+	}
+}
+
 func TestRunGrabSessionCompletionCancelsRenderer(t *testing.T) {
 	rendererStopped := make(chan struct{})
 	renderer := &fakeGrabRenderer{run: func(ctx context.Context) error {
