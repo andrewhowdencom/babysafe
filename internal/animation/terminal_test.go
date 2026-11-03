@@ -34,7 +34,11 @@ func TestNewANSITerminalRejectsDumbTermBeforeWriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	_, err = newANSITerminal(file)
 	if err == nil || !strings.Contains(err.Error(), "color-capable") {

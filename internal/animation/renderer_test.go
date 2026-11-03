@@ -31,7 +31,7 @@ func (t *fakeTerminal) enter() error {
 	})
 	return nil
 }
-func (t *fakeTerminal) size() (int, int, error) {
+func (t *fakeTerminal) size() (width, height int, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.width, t.height, nil

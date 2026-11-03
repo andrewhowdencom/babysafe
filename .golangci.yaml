@@ -1,32 +1,30 @@
-# golangci-lint v1 configuration.
-# Schema reference: https://golangci-lint.run/usage/configuration/
+# golangci-lint v2 configuration.
+version: "2"
+
+run:
+  tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
-    - errcheck       # Unchecked errors
-    - govet          # Suspicious constructs
-    - ineffassign    # Unused assignments
-    - staticcheck    # Static analysis
-    - unused         # Unused identifiers
-    - gosec          # Security
-    - gocritic       # Opinionated style / perf
-    - misspell       # Typos
-    - bodyclose      # HTTP body close
-    - contextcheck   # ctx propagation
-    - nilerr         # Returning nil after handling err
-    - nolintlint     # nolint correctness
-
+    - bodyclose
+    - contextcheck
+    - errcheck
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - nolintlint
+    - staticcheck
+    - unused
   settings:
     gocritic:
       enabled-tags:
         - diagnostic
         - style
         - performance
-
-run:
-  timeout: 5m
-  tests: true
 
 issues:
   max-issues-per-linter: 0
