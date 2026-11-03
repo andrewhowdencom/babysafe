@@ -56,8 +56,8 @@ func (t *ansiTerminal) enter() error {
 	return t.write(enterSequence)
 }
 
-func (t *ansiTerminal) size() (int, int, error) {
-	width, height, err := term.GetSize(t.fd)
+func (t *ansiTerminal) size() (width, height int, err error) {
+	width, height, err = term.GetSize(t.fd)
 	if err != nil {
 		return 0, 0, fmt.Errorf("get terminal size: %w", err)
 	}

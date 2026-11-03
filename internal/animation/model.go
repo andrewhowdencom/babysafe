@@ -107,10 +107,11 @@ func (m *model) advance(elapsed time.Duration) {
 		return
 	}
 	live := m.effects[:0]
-	for _, e := range m.effects {
+	for i := range m.effects {
+		e := &m.effects[i]
 		e.age += elapsed
 		if e.age < launchDuration+burstDuration {
-			live = append(live, e)
+			live = append(live, *e)
 		}
 	}
 	m.effects = live
@@ -126,7 +127,8 @@ func (m *model) clamp(e *effect) {
 
 func (m *model) frame() []sprite {
 	frame := make([]sprite, 0, len(m.effects)*(particleCount+4))
-	for _, e := range m.effects {
+	for i := range m.effects {
+		e := &m.effects[i]
 		x := int(math.Round(e.x))
 		if e.age < launchDuration {
 			progress := float64(e.age) / float64(launchDuration)

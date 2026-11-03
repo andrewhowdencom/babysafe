@@ -43,7 +43,9 @@ everything.`,
 			w := cmd.OutOrStdout()
 			if showPathsOnly {
 				for _, d := range devs {
-					fmt.Fprintln(w, d.Path)
+					if _, err := fmt.Fprintln(w, d.Path); err != nil {
+						return err
+					}
 				}
 				return nil
 			}
@@ -60,10 +62,14 @@ everything.`,
 				}
 			}
 
-			fmt.Fprintf(w, "%-*s  %-*s  TYPES\n", pathW, "PATH", nameW, "NAME")
+			if _, err := fmt.Fprintf(w, "%-*s  %-*s  TYPES\n", pathW, "PATH", nameW, "NAME"); err != nil {
+				return err
+			}
 			for _, d := range devs {
-				fmt.Fprintf(w, "%-*s  %-*s  %s\n",
-					pathW, d.Path, nameW, d.Name, joinTypes(d.Types))
+				if _, err := fmt.Fprintf(w, "%-*s  %-*s  %s\n",
+					pathW, d.Path, nameW, d.Name, joinTypes(d.Types)); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
