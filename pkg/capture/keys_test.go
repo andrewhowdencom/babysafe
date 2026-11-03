@@ -33,3 +33,29 @@ func TestShouldForwardOnlySelectedKeyEvents(t *testing.T) {
 		t.Fatal("unselected event was forwarded")
 	}
 }
+
+func TestVirtualKeyboardCodesIncludeKeyboardIdentityAndExcludedKeys(t *testing.T) {
+	codes := virtualKeyboardCodes([]evdev.EvCode{evdev.KEY_F13, evdev.KEY_F14, evdev.KEY_F13})
+	seen := make(map[evdev.EvCode]bool)
+	for _, code := range codes {
+		if seen[code] {
+			t.Fatalf("duplicate code %d", code)
+		}
+		seen[code] = true
+	}
+	for code := evdev.EvCode(evdev.KEY_ESC); code <= evdev.KEY_S; code++ {
+		if !seen[code] {
+			t.Errorf("keyboard identity lacks code %d", code)
+		}
+	}
+	for _, code := range []evdev.EvCode{evdev.KEY_F13, evdev.KEY_F14} {
+		if !seen[code] {
+			t.Errorf("excluded key %d missing from virtual device", code)
+		}
+	}
+	for _, code := range []evdev.EvCode{evdev.KEY_A, evdev.KEY_Z, evdev.KEY_ENTER} {
+		if !seen[code] {
+			t.Errorf("hotkey listener keyboard check lacks code %d", code)
+		}
+	}
+}
